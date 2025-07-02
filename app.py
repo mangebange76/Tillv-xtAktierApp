@@ -4,93 +4,121 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-# 🛡️ Autentisering mot Google Sheets via secrets
+# Autentisering via Streamlit secrets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 credentials = Credentials.from_service_account_info(st.secrets["GOOGLE_CREDENTIALS"], scopes=scope)
-client = gspread.authorize(credentials)
+gc = gspread.authorize(credentials)
 
-# 🗂️ Ange ditt Google Sheet-ID
+# Google Sheet ID och ark
 SHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"
-worksheet = client.open_by_key(SHEET_ID).sheet1
+SHEET_NAME = "Tillväxtaktier"
 
-# 📥 Läs in befintlig data från Google Sheets
-@st.cache_data(ttl=600)
-def load_data():
-    records = worksheet.get_all_records()
-    return pd.DataFrame(records)
+# Hämta Google Sheet
+sh = gc.open_by_key(SHEET_ID)
+worksheet = sh.worksheet(SHEET_NAME)
 
-# 📤 Spara ny rad i Google Sheets
-def save_row(row_dict):
-    worksheet.append_row(list(row_dict.values()))
+# Funktion: Hämta befintlig data
+def get_sheet_data():
+    data = worksheet.get_all_records()
+    return pd.DataFrame(data)
 
-# 🔄 Uppdatera en befintlig rad (baserat på ticker)
-def update_row(ticker, updated_row):
-    records = worksheet.get_all_records()
-    for i, row in enumerate(records):
-        if row["Ticker"] == ticker:
-            worksheet.update(f"A{i+2}", [list(updated_row.values())])
-            break
+# Funktion: Spara ny rad
+def add_row(ticker, tillv_2027):
+    existing = worksheet.get_all_values()
+    tickers = [row[0] for row in existing[1:]]
+    if ticker not in tickers:
+        worksheet.append_row([ticker, tillv_2027])
+        st.success(f"{ticker} har lagts till!")
+    else:
+        st.warning(f"{ticker} finns redan.")
 
-# 🔍 Hämta finansiell data via yfinance
-def fetch_financials(ticker):
-    ticker_obj = yf.Ticker(ticker)
-    info = ticker_obj.info
-    currency = info.get("currency", "USD")
-    price = info.get("currentPrice") or info.get("regularMarketPrice")
-    shares = info.get("sharesOutstanding")
-    market_cap = info.get("marketCap")
-
-    # Hämta kvartalsvis omsättning (senaste 4 kvartal)
+# Funktion: Hämta TTM-omsättning (senaste 4 kvartal)
+def get_ttm_revenue(ticker_obj):
     try:
-        revenue_quarterly = ticker_obj.quarterly_income_stmt.loc["Total Revenue"]
-        revenue_ttm = revenue_quarterly.iloc[:4].sum()
-    except:
-        revenue_ttm = None
-
-    return {
-        "Ticker": ticker.upper(),
-        "Price": price,
-        "Shares": shares,
-        "Market Cap": market_cap,
-        "Revenue TTM": revenue_ttm,
-        "Currency": currency
-    }
-
-# 📈 Beräkna P/S TTM
-def calculate_ps_ttm(market_cap, revenue_ttm):
-    try:
-        return round(market_cap / revenue_ttm, 2)
-    except:
+        q = ticker_obj.quarterly_financials
+        revenue = q.loc["Total Revenue"].dropna()
+        if len(revenue) < 4:
+            return None
+        return revenue.iloc[:4].sum()
+    except Exception as e:
+        st.session_state["log"].append(f"❌ Kunde inte hämta omsättning för {ticker_obj.ticker}: {e}")
         return None
 
-# 🚀 Streamlit UI
-st.title("📊 Automatisk aktieanalys – P/S TTM")
+# Funktion: Hämta antal aktier
+def get_shares_outstanding(ticker_obj):
+    try:
+        info = ticker_obj.info
+        return info.get("sharesOutstanding", None)
+    except Exception as e:
+        st.session_state["log"].append(f"❌ Kunde inte hämta aktier för {ticker_obj.ticker}: {e}")
+        return None
 
-ticker = st.text_input("Ange ticker (t.ex. AAPL):")
-if st.button("Hämta och spara data"):
-    if not ticker:
-        st.warning("Ange en giltig ticker först.")
-    else:
-        with st.spinner("Hämtar data..."):
-            data = fetch_financials(ticker)
-            if data["Price"] and data["Revenue TTM"]:
-                ps_ttm = calculate_ps_ttm(data["Market Cap"], data["Revenue TTM"])
-                data["P/S TTM"] = ps_ttm
-                save_row(data)
-                st.success(f"Data sparad för {ticker.upper()}")
-            else:
-                st.error("Kunde inte hämta komplett data. Kontrollera att tickern är korrekt och listad.")
+# Titel
+st.title("📈 Tillväxtaktier – Målkurs 2027")
 
-# 🗃️ Visa sparade bolag
-df = load_data()
-if not df.empty:
-    df_sorted = df.sort_values(by="P/S TTM", ascending=True)
-    st.subheader("📋 Sparade analyser")
-    st.dataframe(df_sorted.reset_index(drop=True))
+# Inmatningsfält
+ticker_input = st.text_input("Ange en ticker (t.ex. AAPL)")
+tillv_input = st.number_input("Förväntad tillväxt till 2027 (%)", value=20)
 
-    # Bläddringsfunktion
-    tickers = df_sorted["Ticker"].tolist()
-    selected = st.selectbox("Välj bolag att visa detaljer för", tickers)
-    selected_row = df_sorted[df_sorted["Ticker"] == selected]
-    st.write("📌 Detaljerad data:")
-    st.dataframe(selected_row)
+if st.button("Lägg till bolag"):
+    if ticker_input:
+        add_row(ticker_input.upper(), tillv_input)
+        st.experimental_rerun()
+
+# Initiera logg
+if "log" not in st.session_state:
+    st.session_state["log"] = []
+
+# Visa analys
+st.subheader("🔎 Analys")
+df = get_sheet_data()
+
+results = []
+for _, row in df.iterrows():
+    ticker = row["Ticker"]
+    tillv = row["Tillväxt 2027"]
+    yf_ticker = yf.Ticker(ticker)
+
+    try:
+        price = yf_ticker.history(period="1d")["Close"].iloc[-1]
+        revenue_ttm = get_ttm_revenue(yf_ticker)
+        shares_out = get_shares_outstanding(yf_ticker)
+
+        if not all([price, revenue_ttm, shares_out]):
+            results.append({
+                "Ticker": ticker,
+                "Nuvarande kurs": "❌",
+                "Omsättning TTM": revenue_ttm,
+                "Antal aktier": shares_out,
+                "Tillväxt %": tillv,
+                "Omsättning 2027": None,
+                "Målkurs 2027": "❌"
+            })
+            continue
+
+        revenue_2027 = revenue_ttm * (1 + tillv / 100)
+        ps_ttm = price / (revenue_ttm / shares_out)
+        target_price = (revenue_2027 / shares_out) * ps_ttm
+
+        results.append({
+            "Ticker": ticker,
+            "Nuvarande kurs": round(price, 2),
+            "Omsättning TTM": round(revenue_ttm / 1e9, 2),
+            "Antal aktier": int(shares_out),
+            "Tillväxt %": tillv,
+            "Omsättning 2027": round(revenue_2027 / 1e9, 2),
+            "Målkurs 2027": round(target_price, 2)
+        })
+
+    except Exception as e:
+        st.session_state["log"].append(f"❌ Fel för {ticker}: {e}")
+
+# Visa tabell
+if results:
+    df_result = pd.DataFrame(results)
+    st.dataframe(df_result)
+
+# Logg
+with st.expander("🪵 Logg för felsökning"):
+    for line in st.session_state["log"]:
+        st.write(line)
