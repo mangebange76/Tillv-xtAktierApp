@@ -1,5 +1,10 @@
 streamlit
 yfinance
+pandas
 gspread
 google-auth
-pandas
+google-auth-oauthlib
+google-auth-httplib2
+oauth2client
+pyasn1
+pyasn1-modules
