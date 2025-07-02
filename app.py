@@ -1,116 +1,126 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- Autentisering till Google Sheets ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+# --- Autentisering och Google Sheet-setup ---
+scope = ["https://www.googleapis.com/auth/spreadsheets"]
 credentials_dict = st.secrets["GOOGLE_CREDENTIALS"]
 credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
-client = gspread.authorize(credentials)
+gc = gspread.authorize(credentials)
 
-# --- Inställningar för Google Sheet ---
+# Ange rätt Sheet-ID och bladnamn
 SHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"
 SHEET_NAME = "Blad1"
-sh = client.open_by_key(SHEET_ID)
+sh = gc.open_by_key(SHEET_ID)
+worksheet = sh.worksheet(SHEET_NAME)
 
-# --- Skapa blad och rubriker om de inte finns ---
-try:
-    worksheet = sh.worksheet(SHEET_NAME)
-except gspread.WorksheetNotFound:
-    worksheet = sh.add_worksheet(title=SHEET_NAME, rows="100", cols="10")
+# Förväntade kolumnrubriker
+HEADERS = [
+    "Ticker", "Namn", "Valuta", "Senaste kurs", "Omsättning TTM", "Börsvärde", "Antal aktier",
+    "P/S 1", "P/S 2", "P/S 3", "P/S 4", "P/S 5", "P/S snitt",
+    "Tillväxt 2025 (%)", "Tillväxt 2026 (%)", "Tillväxt 2027 (%)",
+    "Omsättning 2027", "Målkurs 2027"
+]
 
-# Kontroll: skapa rubriker om de saknas
-if not worksheet.get_all_values():
-    headers = ["Ticker", "Namn", "Valuta", "Senaste kurs", "Omsättning TTM", "Börsvärde",
-               "Antal aktier", "P/S 1", "P/S 2", "P/S 3", "P/S 4", "P/S 5", "P/S snitt",
-               "Tillväxt 2025 (%)", "Tillväxt 2026 (%)", "Tillväxt 2027 (%)",
-               "Omsättning 2027", "Målkurs 2027"]
-    worksheet.append_row(headers)
+def initialize_headers():
+    current_values = worksheet.row_values(1)
+    if current_values != HEADERS:
+        worksheet.clear()
+        worksheet.insert_row(HEADERS, 1)
 
-# --- Funktion: Läs data från sheet ---
 def load_data():
+    initialize_headers()
     data = worksheet.get_all_records()
-    df = pd.DataFrame(data)
-    st.write("🔍 Kolumner i datan:", df.columns.tolist())  # felsökningsrad
-    return df
+    return pd.DataFrame(data)
 
-# --- Funktion: Lägg till ticker om den inte redan finns ---
+def save_data(df):
+    worksheet.clear()
+    worksheet.insert_row(HEADERS, 1)
+    if not df.empty:
+        rows = df.astype(str).values.tolist()
+        worksheet.append_rows(rows)
+
 def add_ticker(ticker):
     df = load_data()
-    if "Ticker" not in df.columns:
-        st.error("❌ Sheet saknar 'Ticker'-kolumn. Kontrollera rubriker.")
+    if ticker in df["Ticker"].values:
+        st.warning(f"{ticker} finns redan.")
         return
-    if ticker.upper() in df["Ticker"].values:
-        st.warning("⚠️ Ticker finns redan.")
-    else:
-        worksheet.append_row([ticker.upper()] + [""] * (len(df.columns)-1))
-        st.success(f"✅ Ticker '{ticker.upper()}' tillagd!")
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        hist = stock.history(period="1d")
+        price = hist["Close"].iloc[-1] if not hist.empty else None
+        currency = info.get("currency", "")
+        name = info.get("shortName", "")
 
-# --- Hämta och uppdatera info för alla tickers ---
-def update_all_data():
-    df = load_data()
-    updated_rows = []
-    for ticker in df["Ticker"]:
+        shares = info.get("sharesOutstanding")
+        market_cap = info.get("marketCap")
+        revenue = info.get("totalRevenue")
+
+        if not all([price, currency, name, shares, market_cap, revenue]):
+            st.warning(f"Kunde inte hämta fullständig data för {ticker}.")
+            return
+
+        # Beräkna P/S för 5 senaste kvartal
+        ps_values = []
         try:
-            info = yf.Ticker(ticker).info
-            name = info.get("shortName", "")
-            currency = info.get("currency", "")
-            price = info.get("currentPrice", "")
-            shares = info.get("sharesOutstanding", None)
-            market_cap = info.get("marketCap", None)
-            revenue = info.get("totalRevenue", None)
+            quarters = stock.quarterly_financials.loc["Total Revenue"].sort_index(ascending=False)
+            for i in range(4):
+                ttm = quarters[i:i+4].sum()
+                ps = market_cap / ttm if ttm != 0 else None
+                if ps:
+                    ps_values.append(round(ps, 2))
+        except:
+            pass
 
-            if shares and revenue:
-                ps_list = []
-                for _ in range(5):
-                    ps = round(market_cap / revenue, 2)
-                    ps_list.append(ps)
-                ps_avg = round(sum(ps_list) / len(ps_list), 2)
+        ps_avg = round(sum(ps_values) / len(ps_values), 2) if ps_values else ""
 
-                # Tillväxt manuellt
-                growth_2025 = 10
-                growth_2026 = 10
-                growth_2027 = 10
-                revenue_2027 = revenue * (1 + growth_2025/100) * (1 + growth_2026/100) * (1 + growth_2027/100)
-                target_price = round((revenue_2027 / shares) * ps_avg, 2)
-            else:
-                ps_list = [""]*5
-                ps_avg = revenue_2027 = target_price = ""
+        tillv_25, tillv_26, tillv_27 = "", "", ""
+        oms_2027 = ""
+        malkurs = ""
 
-            updated_row = [ticker, name, currency, price, revenue, market_cap, shares,
-                           *ps_list, ps_avg, growth_2025, growth_2026, growth_2027,
-                           revenue_2027, target_price]
-            updated_rows.append(updated_row)
-        except Exception as e:
-            st.error(f"Fel vid uppdatering av {ticker}: {e}")
+        new_row = [ticker, name, currency, round(price, 2), revenue, market_cap, shares] + \
+                  ps_values + [""] * (5 - len(ps_values)) + [ps_avg, tillv_25, tillv_26, tillv_27, oms_2027, malkurs]
 
-    if updated_rows:
-        worksheet.clear()
-        worksheet.append_row(["Ticker", "Namn", "Valuta", "Senaste kurs", "Omsättning TTM", "Börsvärde",
-                              "Antal aktier", "P/S 1", "P/S 2", "P/S 3", "P/S 4", "P/S 5", "P/S snitt",
-                              "Tillväxt 2025 (%)", "Tillväxt 2026 (%)", "Tillväxt 2027 (%)",
-                              "Omsättning 2027", "Målkurs 2027"])
-        for row in updated_rows:
-            worksheet.append_row(row)
-        st.success("✅ Alla bolag uppdaterade.")
+        df.loc[len(df)] = new_row
+        save_data(df)
+        st.success(f"{ticker} tillagd.")
+    except Exception as e:
+        st.error(f"Fel vid hämtning: {e}")
 
-# --- Streamlit-gränssnitt ---
-st.title("📈 Automatisk analys av tillväxtaktier")
-new_ticker = st.text_input("Lägg till en ny ticker (t.ex. AAPL):")
-if st.button("➕ Lägg till"):
-    if new_ticker:
-        add_ticker(new_ticker)
-    else:
-        st.warning("Ange en giltig ticker.")
+def main():
+    st.title("📈 Aktieanalys – Målkurs via P/S TTM")
 
-if st.button("🔁 Uppdatera all data"):
-    update_all_data()
+    df = load_data()
 
-# Visa datan
-df = load_data()
-if not df.empty:
-    st.dataframe(df)
-else:
-    st.info("Inga bolag inlagda ännu.")
+    # Tickerinmatning
+    with st.form("add_ticker_form"):
+        new_ticker = st.text_input("Lägg till ticker", "").upper()
+        submitted = st.form_submit_button("Lägg till")
+        if submitted and new_ticker:
+            add_ticker(new_ticker)
+            st.experimental_rerun()
+
+    if df.empty:
+        st.info("Inga aktier tillagda ännu.")
+        return
+
+    # Visa aktier
+    sorterat_df = df.copy()
+    if "Målkurs 2027" in sorterat_df.columns and "Senaste kurs" in sorterat_df.columns:
+        try:
+            sorterat_df["Undervärdering (%)"] = (
+                (sorterat_df["Målkurs 2027"].astype(float) - sorterat_df["Senaste kurs"].astype(float)) /
+                sorterat_df["Senaste kurs"].astype(float)
+            ) * 100
+            sorterat_df = sorterat_df.sort_values(by="Undervärdering (%)", ascending=False)
+        except:
+            pass
+
+    st.subheader("📊 Analyserade aktier")
+    st.dataframe(sorterat_df, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
