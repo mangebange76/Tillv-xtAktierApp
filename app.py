@@ -1,70 +1,96 @@
 import streamlit as st
 import yfinance as yf
-import gspread
-import json
-from google.oauth2.service_account import Credentials
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 
-# --- Autentisering mot Google Sheets ---
+# 🛡️ Autentisering mot Google Sheets via secrets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
-gc = gspread.authorize(credentials)
+credentials = Credentials.from_service_account_info(st.secrets["GOOGLE_CREDENTIALS"], scopes=scope)
+client = gspread.authorize(credentials)
 
-# --- Ange ditt Sheet-ID (från URL) ---
-SHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"  # ändra till ditt om du använder ett annat
+# 🗂️ Ange ditt Google Sheet-ID
+SHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"
+worksheet = client.open_by_key(SHEET_ID).sheet1
 
-# --- Öppna kalkylbladet och hämta datan ---
-sh = gc.open_by_key(SHEET_ID)
-worksheet = sh.sheet1
+# 📥 Läs in befintlig data från Google Sheets
+@st.cache_data(ttl=600)
+def load_data():
+    records = worksheet.get_all_records()
+    return pd.DataFrame(records)
 
-# --- Ladda data som pandas DataFrame ---
-data = worksheet.get_all_records()
-df = pd.DataFrame(data)
+# 📤 Spara ny rad i Google Sheets
+def save_row(row_dict):
+    worksheet.append_row(list(row_dict.values()))
 
-# --- Visa datan i Streamlit ---
-st.title("📊 Tillväxtaktier – Automatisk analys")
-st.write("🔍 Data från Google Sheets:")
-st.dataframe(df)
+# 🔄 Uppdatera en befintlig rad (baserat på ticker)
+def update_row(ticker, updated_row):
+    records = worksheet.get_all_records()
+    for i, row in enumerate(records):
+        if row["Ticker"] == ticker:
+            worksheet.update(f"A{i+2}", [list(updated_row.values())])
+            break
 
-# --- Lägg till ny aktie för analys ---
-st.subheader("➕ Lägg till nytt bolag")
-ticker = st.text_input("Ticker-symbol (t.ex. AAPL, MSFT)")
-tillv_2027 = st.number_input("Förväntad tillväxt 2027 (%)", step=1)
+# 🔍 Hämta finansiell data via yfinance
+def fetch_financials(ticker):
+    ticker_obj = yf.Ticker(ticker)
+    info = ticker_obj.info
+    currency = info.get("currency", "USD")
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    shares = info.get("sharesOutstanding")
+    market_cap = info.get("marketCap")
 
-if st.button("Analysera och lägg till"):
-    if ticker:
-        try:
-            aktie = yf.Ticker(ticker)
-            info = aktie.info
-            namn = info.get("shortName", "Okänt")
-            valuta = info.get("financialCurrency", "USD")
-            marketcap = info.get("marketCap", None)
-            sales_ttm = info.get("totalRevenue", None)
-            shares = marketcap / info["currentPrice"] if marketcap and info.get("currentPrice") else None
+    # Hämta kvartalsvis omsättning (senaste 4 kvartal)
+    try:
+        revenue_quarterly = ticker_obj.quarterly_income_stmt.loc["Total Revenue"]
+        revenue_ttm = revenue_quarterly.iloc[:4].sum()
+    except:
+        revenue_ttm = None
 
-            if None in (marketcap, sales_ttm, shares):
-                st.error("Kunde inte hämta tillräcklig finansiell data.")
-            else:
-                ps_ttm = marketcap / sales_ttm
-                tillv_multiplikator = (1 + tillv_2027 / 100)
-                forecast_sales_2027 = sales_ttm * tillv_multiplikator**3
-                target_price = (forecast_sales_2027 / shares) * ps_ttm
+    return {
+        "Ticker": ticker.upper(),
+        "Price": price,
+        "Shares": shares,
+        "Market Cap": market_cap,
+        "Revenue TTM": revenue_ttm,
+        "Currency": currency
+    }
 
-                ny_rad = {
-                    "Ticker": ticker.upper(),
-                    "Bolag": namn,
-                    "Valuta": valuta,
-                    "P/S TTM": round(ps_ttm, 2),
-                    "Omsättning TTM": int(sales_ttm),
-                    "Antal aktier": int(shares),
-                    "Tillväxt 2027 (%)": tillv_2027,
-                    "Målkurs 2027": round(target_price, 2)
-                }
+# 📈 Beräkna P/S TTM
+def calculate_ps_ttm(market_cap, revenue_ttm):
+    try:
+        return round(market_cap / revenue_ttm, 2)
+    except:
+        return None
 
-                worksheet.append_row(list(ny_rad.values()))
-                st.success(f"{namn} har lagts till i kalkylarket!")
-        except Exception as e:
-            st.error(f"Något gick fel: {e}")
+# 🚀 Streamlit UI
+st.title("📊 Automatisk aktieanalys – P/S TTM")
+
+ticker = st.text_input("Ange ticker (t.ex. AAPL):")
+if st.button("Hämta och spara data"):
+    if not ticker:
+        st.warning("Ange en giltig ticker först.")
     else:
-        st.warning("Ange en ticker-symbol först.")
+        with st.spinner("Hämtar data..."):
+            data = fetch_financials(ticker)
+            if data["Price"] and data["Revenue TTM"]:
+                ps_ttm = calculate_ps_ttm(data["Market Cap"], data["Revenue TTM"])
+                data["P/S TTM"] = ps_ttm
+                save_row(data)
+                st.success(f"Data sparad för {ticker.upper()}")
+            else:
+                st.error("Kunde inte hämta komplett data. Kontrollera att tickern är korrekt och listad.")
+
+# 🗃️ Visa sparade bolag
+df = load_data()
+if not df.empty:
+    df_sorted = df.sort_values(by="P/S TTM", ascending=True)
+    st.subheader("📋 Sparade analyser")
+    st.dataframe(df_sorted.reset_index(drop=True))
+
+    # Bläddringsfunktion
+    tickers = df_sorted["Ticker"].tolist()
+    selected = st.selectbox("Välj bolag att visa detaljer för", tickers)
+    selected_row = df_sorted[df_sorted["Ticker"] == selected]
+    st.write("📌 Detaljerad data:")
+    st.dataframe(selected_row)
