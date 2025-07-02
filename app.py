@@ -1,88 +1,96 @@
 import streamlit as st
+import json
 import yfinance as yf
-import pandas as pd
 import gspread
+import pandas as pd
 from google.oauth2.service_account import Credentials
 
-# Konfigurera Google Sheets API
+# Autentisering mot Google Sheets
 scope = ["https://www.googleapis.com/auth/spreadsheets"]
-credentials = Credentials.from_service_account_info(
-    st.secrets["GOOGLE_CREDENTIALS"], scopes=scope
-)
+credentials_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
 gc = gspread.authorize(credentials)
 
-# Sheet-ID och namn
+# Google Sheet inställningar
 SHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"
 SHEET_NAME = "Blad1"
+
+# Ladda arket
 sh = gc.open_by_key(SHEET_ID)
 worksheet = sh.worksheet(SHEET_NAME)
 
-st.title("📈 Automatisk aktieanalys")
-
-# Funktion för att läsa datan från kalkylarket som DataFrame
+# Läs in existerande data från arket
 def load_data():
     data = worksheet.get_all_records()
     return pd.DataFrame(data)
 
-# Funktion för att lägga till ny ticker
-def add_ticker(ticker):
-    tickers = worksheet.col_values(1)[1:]  # Exkludera header
-    if ticker.upper() not in tickers:
-        worksheet.append_row([ticker.upper()])
-        st.success(f"✅ {ticker.upper()} har lagts till!")
-    else:
-        st.warning("⚠️ Ticker finns redan.")
+# Spara ny ticker till arket
+def save_ticker(ticker):
+    worksheet.append_row([ticker])
 
-# Funktion för att hämta data från yfinance
-def fetch_financials(ticker):
+# Hämtar och beräknar data för ett bolag
+def fetch_and_calculate(ticker, tillväxt_2027):
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        ticker_data = yf.Ticker(ticker)
+        info = ticker_data.info
 
-        currency = info.get("currency", "N/A")
+        namn = info.get("longName", "")
+        nuvarande_kurs = info.get("currentPrice", None)
+        valuta = info.get("currency", "USD")
         market_cap = info.get("marketCap", None)
         shares_outstanding = info.get("sharesOutstanding", None)
+        revenue_ttm = info.get("totalRevenue", None)
 
-        if market_cap is None or shares_outstanding is None:
-            return None
+        if None in (nuvarande_kurs, market_cap, shares_outstanding, revenue_ttm):
+            return {"Ticker": ticker, "Namn": namn, "Status": "❌ Data saknas"}
 
-        ps_ratio = market_cap / (info.get("totalRevenue", 1))
-        price = info.get("currentPrice", None)
-        name = info.get("shortName", "Okänt")
+        ps_ttm = market_cap / revenue_ttm
+        tillväxtfaktor = 1 + tillväxt_2027 / 100
+        uppskattad_omsättning = revenue_ttm * tillväxtfaktor
+        målkurs = (uppskattad_omsättning / shares_outstanding) * ps_ttm
+        undervärdering = ((målkurs - nuvarande_kurs) / nuvarande_kurs) * 100
 
         return {
-            "Bolag": name,
-            "Ticker": ticker.upper(),
-            "Kurs": price,
-            "Valuta": currency,
-            "P/S TTM": round(ps_ratio, 2),
+            "Ticker": ticker,
+            "Namn": namn,
+            "Valuta": valuta,
+            "Nuvarande kurs": round(nuvarande_kurs, 2),
+            "P/S TTM": round(ps_ttm, 2),
+            "Uppskattad omsättning 2027": round(uppskattad_omsättning, 0),
+            "Målkurs 2027": round(målkurs, 2),
+            "Undervärdering (%)": round(undervärdering, 1),
+            "Status": "✅"
         }
+
     except Exception as e:
-        st.error(f"Fel vid hämtning av data för {ticker}: {e}")
-        return None
+        return {"Ticker": ticker, "Namn": "", "Status": f"❌ Fel: {str(e)}"}
 
-# Formulär för att lägga till ticker
-with st.form("add_form"):
-    ticker_input = st.text_input("Lägg till en ticker (t.ex. AAPL)", "")
-    submitted = st.form_submit_button("Lägg till")
-    if submitted and ticker_input.strip():
-        add_ticker(ticker_input.strip())
+# --- Streamlit-gränssnitt ---
 
-# Läs tickers och visa analys
-df = load_data()
-if df.empty:
-    st.info("Ingen ticker tillagd ännu.")
+st.title("📈 Tillväxtaktier – automatisk analys")
+
+# Inmatning av ny ticker
+with st.form("add_ticker"):
+    new_ticker = st.text_input("Lägg till en ny ticker (t.ex. AAPL, MSFT, EVO):")
+    tillväxt_2027 = st.number_input("Förväntad tillväxt % till 2027", value=20)
+    submitted = st.form_submit_button("Analysera och spara")
+    if submitted and new_ticker:
+        save_ticker(new_ticker.upper())
+        st.success(f"{new_ticker.upper()} tillagd!")
+
+# Läs tickers från arket
+tickers_df = load_data()
+tickers_list = tickers_df.iloc[:, 0].tolist() if not tickers_df.empty else []
+
+# Visa resultat för alla tickers
+if tickers_list:
+    results = []
+    for t in tickers_list:
+        data = fetch_and_calculate(t, tillväxt_2027)
+        results.append(data)
+
+    df_result = pd.DataFrame(results)
+    st.dataframe(df_result)
+
 else:
-    st.subheader("🔍 Analys av bolag")
-    for _, row in df.iterrows():
-        ticker = row.get("Ticker") or row.get("ticker") or row.get("TICKER")
-        if not ticker:
-            continue
-        data = fetch_financials(ticker)
-        if data:
-            st.markdown(f"### {data['Bolag']} ({data['Ticker']})")
-            st.write(f"📌 Kurs: {data['Kurs']} {data['Valuta']}")
-            st.write(f"📊 P/S TTM: {data['P/S TTM']}")
-            st.divider()
-        else:
-            st.warning(f"Kunde inte hämta data för {ticker}")
+    st.info("Ingen ticker inlagd än. Lägg till en ovan.")
