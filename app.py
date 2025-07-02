@@ -1,113 +1,70 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
 import gspread
+import json
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+import pandas as pd
 
-# Titel
-st.title("📈 Automatisk analys av aktier (P/S-baserad målkurs)")
-
-# Autentisering mot Google Sheets
+# --- Autentisering mot Google Sheets ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials = Credentials.from_service_account_info(st.secrets["GOOGLE_CREDENTIALS"], scopes=scope)
-client = gspread.authorize(credentials)
+credentials_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
+gc = gspread.authorize(credentials)
 
-# Google Sheet-konfiguration
-SPREADSHEET_NAME = "AktieanalysData"
-try:
-    sheet = client.open(SPREADSHEET_NAME).sheet1
-except:
-    st.error("❌ Kunde inte hitta kalkylarket. Kontrollera att det finns ett kalkylark med namnet 'AktieanalysData'.")
-    st.stop()
+# --- Ange ditt Sheet-ID (från URL) ---
+SHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"  # ändra till ditt om du använder ett annat
 
-# Funktion för att hämta TTM-försäljning och P/S för 4 senaste kvartal
-def fetch_data(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+# --- Öppna kalkylbladet och hämta datan ---
+sh = gc.open_by_key(SHEET_ID)
+worksheet = sh.sheet1
 
-        currency = info.get("currency", "N/A")
-        current_price = info.get("currentPrice", None)
-        shares_outstanding = info.get("sharesOutstanding", None)
-        if not current_price or not shares_outstanding:
-            return None
+# --- Ladda data som pandas DataFrame ---
+data = worksheet.get_all_records()
+df = pd.DataFrame(data)
 
-        # Hämta kvartalsomsättning
+# --- Visa datan i Streamlit ---
+st.title("📊 Tillväxtaktier – Automatisk analys")
+st.write("🔍 Data från Google Sheets:")
+st.dataframe(df)
+
+# --- Lägg till ny aktie för analys ---
+st.subheader("➕ Lägg till nytt bolag")
+ticker = st.text_input("Ticker-symbol (t.ex. AAPL, MSFT)")
+tillv_2027 = st.number_input("Förväntad tillväxt 2027 (%)", step=1)
+
+if st.button("Analysera och lägg till"):
+    if ticker:
         try:
-            quarterly_rev = stock.quarterly_financials.loc["Total Revenue"]
-        except:
-            return None
+            aktie = yf.Ticker(ticker)
+            info = aktie.info
+            namn = info.get("shortName", "Okänt")
+            valuta = info.get("financialCurrency", "USD")
+            marketcap = info.get("marketCap", None)
+            sales_ttm = info.get("totalRevenue", None)
+            shares = marketcap / info["currentPrice"] if marketcap and info.get("currentPrice") else None
 
-        if quarterly_rev.empty or len(quarterly_rev) < 4:
-            return None
+            if None in (marketcap, sales_ttm, shares):
+                st.error("Kunde inte hämta tillräcklig finansiell data.")
+            else:
+                ps_ttm = marketcap / sales_ttm
+                tillv_multiplikator = (1 + tillv_2027 / 100)
+                forecast_sales_2027 = sales_ttm * tillv_multiplikator**3
+                target_price = (forecast_sales_2027 / shares) * ps_ttm
 
-        # Skapa TTM-rev och TTM-P/S
-        quarterly_rev = quarterly_rev.sort_index(ascending=False)
-        rolling_revs = []
-        rolling_ps = []
-        for i in range(len(quarterly_rev) - 3):
-            ttm_revenue = quarterly_rev[i] + quarterly_rev[i + 1] + quarterly_rev[i + 2] + quarterly_rev[i + 3]
-            rolling_revs.append(ttm_revenue)
-            market_cap = current_price * shares_outstanding
-            rolling_ps.append(market_cap / ttm_revenue if ttm_revenue else None)
+                ny_rad = {
+                    "Ticker": ticker.upper(),
+                    "Bolag": namn,
+                    "Valuta": valuta,
+                    "P/S TTM": round(ps_ttm, 2),
+                    "Omsättning TTM": int(sales_ttm),
+                    "Antal aktier": int(shares),
+                    "Tillväxt 2027 (%)": tillv_2027,
+                    "Målkurs 2027": round(target_price, 2)
+                }
 
-        if not rolling_ps:
-            return None
-
-        avg_ps = sum(rolling_ps) / len(rolling_ps)
-        latest_ttm_rev = rolling_revs[0]
-
-        return {
-            "ticker": ticker,
-            "price": current_price,
-            "revenue_ttm": latest_ttm_rev,
-            "ps_avg": avg_ps,
-            "shares": shares_outstanding,
-            "currency": currency
-        }
-    except:
-        return None
-
-# Formulär för att lägga till nytt bolag
-with st.form("add_ticker_form"):
-    ticker = st.text_input("Ange aktiens ticker (t.ex. AAPL):").upper()
-    tillväxt_2027 = st.number_input("Förväntad tillväxt i % till 2027:", min_value=0.0, max_value=1000.0, step=1.0)
-    submitted = st.form_submit_button("Lägg till och analysera")
-
-if submitted and ticker:
-    st.info(f"🔍 Hämtar data för {ticker}...")
-    data = fetch_data(ticker)
-    if data:
-        tillväxtfaktor = 1 + tillväxt_2027 / 100
-        framtida_omsättning = data["revenue_ttm"] * tillväxtfaktor
-        målkurs = (framtida_omsättning / data["shares"]) * data["ps_avg"]
-
-        # Spara till Google Sheets
-        sheet.append_row([
-            ticker,
-            data["price"],
-            data["revenue_ttm"],
-            framtida_omsättning,
-            data["shares"],
-            data["ps_avg"],
-            tillväxt_2027,
-            målkurs,
-            data["currency"],
-            datetime.today().strftime("%Y-%m-%d")
-        ])
-        st.success(f"✅ {ticker} har lagts till! Målkurs 2027: {målkurs:.2f} {data['currency']}")
+                worksheet.append_row(list(ny_rad.values()))
+                st.success(f"{namn} har lagts till i kalkylarket!")
+        except Exception as e:
+            st.error(f"Något gick fel: {e}")
     else:
-        st.error("❌ Misslyckades med att hämta data. Kontrollera att tickern är korrekt.")
-
-# Hämta all data från arket
-try:
-    df = pd.DataFrame(sheet.get_all_records())
-    if not df.empty:
-        df["Undervärdering (%)"] = ((df["Målkurs"] - df["Nuvarande kurs"]) / df["Nuvarande kurs"]) * 100
-        df = df.sort_values(by="Undervärdering (%)", ascending=False)
-
-        st.subheader("📊 Analyserade bolag")
-        st.dataframe(df, use_container_width=True)
-except Exception as e:
-    st.warning("⚠️ Kunde inte läsa in kalkylarksdata.")
+        st.warning("Ange en ticker-symbol först.")
