@@ -1,13 +1,18 @@
-# Ignorera Python cache och miljöfiler
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-env/
-.venv/
+*.py[cod]
+*.env
+.env
+venv/
 
-# Ignorera känslig data
-*.json
-*.toml
-secrets.toml
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+
+# PyCharm
+.idea/
+
+# Google service account
 credentials.json
