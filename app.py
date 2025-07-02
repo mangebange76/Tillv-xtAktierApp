@@ -1,147 +1,132 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+import gspread
+import datetime
 
 st.set_page_config(page_title="Tillväxtaktier", layout="centered")
 
-# --- GOOGLE AUTHENTISERING ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+# Google Sheets-inställningar
+scope = ["https://www.googleapis.com/auth/spreadsheets"]
+credentials_dict = st.secrets["GOOGLE_CREDENTIALS"]
+credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
+gc = gspread.authorize(credentials)
 
-try:
-    credentials_dict = st.secrets["GOOGLE_CREDENTIALS"]
-
-    required_keys = {
-        "type", "project_id", "private_key_id", "private_key",
-        "client_email", "client_id", "token_uri"
-    }
-    missing = required_keys - credentials_dict.keys()
-    if missing:
-        st.error(f"❌ GOOGLE_CREDENTIALS saknar följande nycklar: {', '.join(missing)}")
-        st.stop()
-
-    credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
-    gc = gspread.authorize(credentials)
-
-except KeyError:
-    st.error("❌ GOOGLE_CREDENTIALS saknas helt i Streamlit Secrets.")
-    st.stop()
-except Exception as e:
-    st.error(f"❌ Fel vid autentisering: {e}")
-    st.stop()
-
-# --- SHEET-ID och NAMN ---
 SHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"
 SHEET_NAME = "Blad1"
+sh = gc.open_by_key(SHEET_ID)
+worksheet = sh.worksheet(SHEET_NAME)
 
-# --- LÄS DATA ---
+# Skapa rubrikrad om den saknas
+def ensure_headers():
+    existing_data = worksheet.get_all_values()
+    if not existing_data or "Ticker" not in existing_data[0]:
+        headers = ["Ticker"]
+        worksheet.clear()
+        worksheet.append_row(headers)
+
+# Ladda data från Google Sheet
 def load_data():
-    try:
-        sh = gc.open_by_key(SHEET_ID)
-        worksheet = sh.worksheet(SHEET_NAME)
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"❌ Kunde inte läsa från Google Sheet: {e}")
-        return pd.DataFrame()
+    ensure_headers()
+    data = worksheet.get_all_records()
+    df = pd.DataFrame(data)
+    return df
 
-# --- SPARA NY TICKER ---
+# Lägg till ticker
 def add_ticker(ticker):
     df = load_data()
-    if ticker in df["Ticker"].values:
-        st.warning("Ticker finns redan.")
+
+    if "Ticker" not in df.columns:
+        st.error("❌ Kolumnen 'Ticker' saknas i Google Sheet. Kontrollera att rad 1 innehåller 'Ticker'.")
         return
 
-    sh = gc.open_by_key(SHEET_ID)
-    worksheet = sh.worksheet(SHEET_NAME)
+    if ticker in df["Ticker"].values:
+        st.warning(f"⚠️ Ticker '{ticker}' finns redan.")
+        return
 
-    worksheet.append_row([ticker])
-    st.success(f"✅ {ticker} lades till!")
+    new_row = pd.DataFrame([{"Ticker": ticker}])
+    df = pd.concat([df, new_row], ignore_index=True)
+    worksheet.clear()
+    worksheet.append_row(df.columns.tolist())
+    for row in df.values.tolist():
+        worksheet.append_row(row)
+    st.success(f"✅ '{ticker}' har lagts till.")
 
-# --- HÄMTA & BERÄKNA DATA ---
-def analyze_ticker(ticker):
+# Beräkna TTM P/S-målkurs
+def calculate_analysis(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        ticker_data = yf.Ticker(ticker)
+        hist = ticker_data.quarterly_financials
+        info = ticker_data.info
+        price = info.get("currentPrice")
 
-        if "regularMarketPrice" not in info or "currency" not in info:
+        shares = info.get("sharesOutstanding")
+        currency = info.get("currency", "USD")
+
+        if hist.empty or not shares or not price:
             return None
 
-        currency = info.get("currency", "")
-        current_price = info.get("regularMarketPrice", 0)
-        shares_outstanding = info.get("sharesOutstanding", None)
-
-        if shares_outstanding is None:
+        # Hämta de senaste 4 kvartalens omsättning (Revenue)
+        if "Total Revenue" not in hist.index:
             return None
-
-        # Hämta kvartalsomsättning
-        income_stmt = stock.quarterly_income_stmt
-        if income_stmt.empty or "TotalRevenue" not in income_stmt:
+        revenue_q = hist.loc["Total Revenue"]
+        if len(revenue_q) < 4:
             return None
+        ttm_revenue = revenue_q.iloc[:4].sum()
 
-        quarterly_revenue = income_stmt.loc["TotalRevenue"].dropna()
-        if len(quarterly_revenue) < 4:
-            return None
-
-        ttm_revenue = quarterly_revenue.iloc[:4].sum()
-        market_cap = current_price * shares_outstanding
-        ps_ttm = market_cap / ttm_revenue if ttm_revenue else None
-
-        # Använd tillväxtantagande för 2025–2027
-        tillv_2025 = st.session_state.get(f"{ticker}_2025", 20)
-        tillv_2026 = st.session_state.get(f"{ticker}_2026", 20)
-        tillv_2027 = st.session_state.get(f"{ticker}_2027", 20)
-
-        rev_2025 = ttm_revenue * (1 + tillv_2025 / 100)
-        rev_2026 = rev_2025 * (1 + tillv_2026 / 100)
-        rev_2027 = rev_2026 * (1 + tillv_2027 / 100)
-
-        target_price_2027 = (rev_2027 / shares_outstanding) * ps_ttm
-        undervalued_pct = (target_price_2027 - current_price) / current_price * 100
+        ps_ttm = price / (ttm_revenue / shares)
+        avg_ps = round(ps_ttm, 2)
+        target_price = round((ttm_revenue / shares) * avg_ps, 2)
 
         return {
             "Ticker": ticker,
-            "Kurs": round(current_price, 2),
+            "Kurs": price,
             "Valuta": currency,
-            "P/S TTM": round(ps_ttm, 2),
-            "Omsättning TTM (M)": round(ttm_revenue / 1e6, 1),
-            "Tillväxt 2025": tillv_2025,
-            "Tillväxt 2026": tillv_2026,
-            "Tillväxt 2027": tillv_2027,
-            "Målkurs 2027": round(target_price_2027, 2),
-            "Uppside %": round(undervalued_pct, 1),
+            "P/S TTM": avg_ps,
+            "Omsättning TTM": int(ttm_revenue),
+            "Målkurs": target_price,
+            "Uppside (%)": round(((target_price / price) - 1) * 100, 1)
         }
-
-    except Exception as e:
+    except Exception:
         return None
 
-# --- UI: Lägg till Ticker ---
-st.title("📈 Tillväxtaktier – Målkurs 2027")
-with st.form("add_form"):
-    new_ticker = st.text_input("Lägg till en ticker (t.ex. AAPL):").upper()
-    submitted = st.form_submit_button("➕ Lägg till")
-    if submitted and new_ticker:
-        add_ticker(new_ticker)
+# Huvudfunktion
+def main():
+    st.title("📈 Tillväxtaktier – Automatisk analys")
 
-# --- Ladda och analysera ---
-tickers_df = load_data()
-if tickers_df.empty:
-    st.info("Inga tickers tillagda än.")
-    st.stop()
+    df = load_data()
+    all_results = []
 
-analyzed = []
-for _, row in tickers_df.iterrows():
-    ticker = row["Ticker"]
-    with st.spinner(f"Hämtar data för {ticker}..."):
-        result = analyze_ticker(ticker)
+    for ticker in df["Ticker"]:
+        result = calculate_analysis(ticker)
         if result:
-            analyzed.append(result)
+            all_results.append(result)
 
-if not analyzed:
-    st.warning("Ingen giltig data hittades.")
-    st.stop()
+    if all_results:
+        results_df = pd.DataFrame(all_results)
+        results_df = results_df.sort_values(by="Uppside (%)", ascending=False).reset_index(drop=True)
 
-result_df = pd.DataFrame(analyzed).sort_values(by="Uppside %", ascending=False)
-st.dataframe(result_df, use_container_width=True)
+        st.subheader("🔍 Mest undervärderade bolag")
+        current_index = st.number_input("Visa bolag nummer:", min_value=1, max_value=len(results_df), value=1)
+        selected = results_df.iloc[current_index - 1]
+
+        st.markdown(f"### {selected['Ticker']}")
+        st.metric("Aktuell kurs", f"{selected['Kurs']} {selected['Valuta']}")
+        st.metric("P/S TTM", selected["P/S TTM"])
+        st.metric("Målkurs", f"{selected['Målkurs']} {selected['Valuta']}")
+        st.metric("Uppside", f"{selected['Uppside (%)']} %")
+    else:
+        st.info("ℹ️ Ingen komplett data kunde analyseras än. Lägg till en ticker.")
+
+    # Lägg till ticker
+    st.subheader("➕ Lägg till ny ticker")
+    new_ticker = st.text_input("Ange ticker (t.ex. AAPL):").upper()
+    if st.button("Lägg till"):
+        if new_ticker:
+            add_ticker(new_ticker)
+        else:
+            st.warning("⚠️ Fältet får inte vara tomt.")
+
+if __name__ == "__main__":
+    main()
