@@ -1,2 +1,13 @@
+# Ignorera Python cache och miljöfiler
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+env/
+.venv/
+
+# Ignorera känslig data
+*.json
+*.toml
+secrets.toml
 credentials.json
-.secrets.toml
