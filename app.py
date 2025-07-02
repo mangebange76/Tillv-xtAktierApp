@@ -4,136 +4,129 @@ import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Autentisering
+# Autentisering med Google Sheets via st.secrets
 scope = ["https://www.googleapis.com/auth/spreadsheets"]
 credentials_dict = st.secrets["GOOGLE_CREDENTIALS"]
 credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
-gc = gspread.authorize(credentials)
+client = gspread.authorize(credentials)
 
-# Inställningar
-SPREADSHEET_NAME = "Aktieanalys"
-SHEET_NAME = "Blad1"
+SPREADSHEET_URL = st.secrets["SPREADSHEET_URL"]
+sheet = client.open_by_url(SPREADSHEET_URL).sheet1
 
-@st.cache_data(ttl=60)
-def load_sheet():
+# Funktion för att läsa data
+def load_data():
+    data = sheet.get_all_records()
+    df = pd.DataFrame(data)
+    expected_cols = ["Ticker", "Namn", "Nuvarande kurs", "Valuta", "Omsättning TTM", "P/S TTM",
+                     "Tillväxt 2025", "Tillväxt 2026", "Tillväxt 2027", "Omsättning 2027", "Målkurs 2027"]
+    if df.empty or list(df.columns) != expected_cols:
+        st.error("❌ Sheet saknar rätt kolumner. Kontrollera rubriker i rad 1.")
+        st.stop()
+    return df
+
+# Funktion för att spara data
+def save_data(df):
+    sheet.clear()
+    sheet.append_row(df.columns.tolist())
+    for _, row in df.iterrows():
+        sheet.append_row(row.astype(str).tolist())
+
+# Funktion för att hämta data och uppdatera för ett bolag
+def update_ticker(ticker):
     try:
-        sh = gc.open(SPREADSHEET_NAME)
-    except gspread.SpreadsheetNotFound:
-        sh = gc.create(SPREADSHEET_NAME)
-    try:
-        worksheet = sh.worksheet(SHEET_NAME)
-    except gspread.WorksheetNotFound:
-        worksheet = sh.add_worksheet(title=SHEET_NAME, rows="100", cols="20")
+        ticker = ticker.strip().upper()
+        stock = yf.Ticker(ticker)
 
-    data = worksheet.get_all_values()
-    if not data or data[0] != [
-        "Ticker", "Namn", "Nuvarande kurs", "Valuta",
-        "Omsättning TTM", "P/S TTM",
-        "Tillväxt 2025", "Tillväxt 2026", "Tillväxt 2027",
-        "Omsättning 2027", "Målkurs 2027"
-    ]:
-        worksheet.update("A1:K1", [[
-            "Ticker", "Namn", "Nuvarande kurs", "Valuta",
-            "Omsättning TTM", "P/S TTM",
-            "Tillväxt 2025", "Tillväxt 2026", "Tillväxt 2027",
-            "Omsättning 2027", "Målkurs 2027"
-        ]])
-        return pd.DataFrame(columns=[
-            "Ticker", "Namn", "Nuvarande kurs", "Valuta",
-            "Omsättning TTM", "P/S TTM",
-            "Tillväxt 2025", "Tillväxt 2026", "Tillväxt 2027",
-            "Omsättning 2027", "Målkurs 2027"
-        ])
-    return pd.DataFrame(data[1:], columns=data[0])
+        info = stock.info
+        hist = stock.history(period="1y", interval="3mo")
 
-def save_sheet(df):
-    sh = gc.open(SPREADSHEET_NAME)
-    worksheet = sh.worksheet(SHEET_NAME)
-    worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        name = info.get("shortName", "Okänt")
+        currency = info.get("currency", "N/A")
+        current_price = info.get("currentPrice", 0.0)
 
-def calculate_projection(row):
-    try:
-        revenue = float(row["Omsättning TTM"])
-        growth_25 = float(row["Tillväxt 2025"]) / 100
-        growth_26 = float(row["Tillväxt 2026"]) / 100
-        growth_27 = float(row["Tillväxt 2027"]) / 100
-        ps = float(row["P/S TTM"])
-        shares = None  # Placeholder om vi vill räkna ut per aktie
-        projected_revenue = revenue * (1 + growth_25) * (1 + growth_26) * (1 + growth_27)
-        price_target = projected_revenue * ps
-        return round(projected_revenue, 2), round(price_target, 2)
+        shares_outstanding = info.get("sharesOutstanding", None)
+        if shares_outstanding is None:
+            st.warning(f"⚠️ Kunde inte hämta antal aktier för {ticker}")
+            return None
+
+        quarterly_rev = stock.quarterly_financials
+        if quarterly_rev.empty:
+            st.warning(f"⚠️ Ingen kvartalsomsättning hittad för {ticker}")
+            return None
+
+        revenues = quarterly_rev.loc["Total Revenue"].values[:4]
+        if len(revenues) < 4 or any(pd.isna(revenues)):
+            st.warning(f"⚠️ Omsättningsdata saknas eller är ofullständig för {ticker}")
+            return None
+
+        revenue_ttm = sum(revenues)
+        ps_ttm = (current_price * shares_outstanding) / revenue_ttm if revenue_ttm else None
+
+        tillvaxt_2025 = st.session_state.get("tillvaxt_2025", 10.0)
+        tillvaxt_2026 = st.session_state.get("tillvaxt_2026", 10.0)
+        tillvaxt_2027 = st.session_state.get("tillvaxt_2027", 10.0)
+
+        oms_2027 = revenue_ttm * (1 + tillvaxt_2025/100) * (1 + tillvaxt_2026/100) * (1 + tillvaxt_2027/100)
+        malkurs_2027 = (oms_2027 / shares_outstanding) * ps_ttm if shares_outstanding else None
+
+        return {
+            "Ticker": ticker,
+            "Namn": name,
+            "Nuvarande kurs": round(current_price, 2),
+            "Valuta": currency,
+            "Omsättning TTM": round(revenue_ttm, 2),
+            "P/S TTM": round(ps_ttm, 2),
+            "Tillväxt 2025": tillvaxt_2025,
+            "Tillväxt 2026": tillvaxt_2026,
+            "Tillväxt 2027": tillvaxt_2027,
+            "Omsättning 2027": round(oms_2027, 2),
+            "Målkurs 2027": round(malkurs_2027, 2)
+        }
+
     except Exception as e:
-        return "", ""
+        st.error(f"❌ Fel vid uppdatering av {ticker}: {e}")
+        return None
 
-def update_all_data(df):
-    updated_rows = []
-    for index, row in df.iterrows():
-        ticker = row["Ticker"]
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            name = info.get("shortName", "")
-            price = info.get("currentPrice", "")
-            currency = info.get("currency", "")
-            shares_out = info.get("sharesOutstanding")
-            revenue_ttm = info.get("totalRevenue")
-
-            if revenue_ttm and shares_out:
-                market_cap = shares_out * price if price else None
-                ps_ttm = round(market_cap / revenue_ttm, 2) if market_cap else ""
-            else:
-                ps_ttm = ""
-
-            df.at[index, "Namn"] = name
-            df.at[index, "Nuvarande kurs"] = price
-            df.at[index, "Valuta"] = currency
-            df.at[index, "Omsättning TTM"] = revenue_ttm
-            df.at[index, "P/S TTM"] = ps_ttm
-
-            projected_revenue, price_target = calculate_projection(df.loc[index])
-            df.at[index, "Omsättning 2027"] = projected_revenue
-            df.at[index, "Målkurs 2027"] = price_target
-
-        except Exception as e:
-            st.error(f"❌ Fel vid uppdatering av {ticker}: {e}")
-    return df
-
-def add_ticker(ticker, df):
+# Lägg till nytt bolag
+def add_ticker(ticker):
+    df = load_data()
     if ticker in df["Ticker"].values:
-        st.warning("Ticker finns redan.")
-        return df
+        st.warning("⚠️ Bolaget finns redan.")
+        return
+    data = update_ticker(ticker)
+    if data:
+        df = pd.concat([df, pd.DataFrame([data])], ignore_index=True)
+        save_data(df)
 
-    new_row = {
-        "Ticker": ticker,
-        "Namn": "", "Nuvarande kurs": "", "Valuta": "",
-        "Omsättning TTM": "", "P/S TTM": "",
-        "Tillväxt 2025": "10", "Tillväxt 2026": "10", "Tillväxt 2027": "10",
-        "Omsättning 2027": "", "Målkurs 2027": ""
-    }
-    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    return df
+# Uppdatera alla bolag
+def update_all():
+    df = load_data()
+    updated_rows = []
+    for _, row in df.iterrows():
+        data = update_ticker(row["Ticker"])
+        if data:
+            updated_rows.append(data)
+    if updated_rows:
+        save_data(pd.DataFrame(updated_rows))
 
-# ---------- Streamlit UI ----------
-st.set_page_config(page_title="Aktieanalys", layout="wide")
-st.title("📈 Aktieanalys – målkurs baserat på tillväxt och P/S")
+# UI
+def main():
+    st.title("📈 Aktieanalys – Tillväxt och Målkurs")
+    df = load_data()
 
-df = load_sheet()
+    st.number_input("Tillväxt 2025 (%)", value=10.0, key="tillvaxt_2025")
+    st.number_input("Tillväxt 2026 (%)", value=10.0, key="tillvaxt_2026")
+    st.number_input("Tillväxt 2027 (%)", value=10.0, key="tillvaxt_2027")
 
-# Tickerinmatning
-new_ticker = st.text_input("Lägg till ticker (t.ex. AAPL)")
-if st.button("Lägg till") and new_ticker:
-    df = add_ticker(new_ticker.strip().upper(), df)
-    save_sheet(df)
-    st.success("Ticker tillagd.")
+    new_ticker = st.text_input("Lägg till ny ticker")
+    if st.button("➕ Lägg till"):
+        add_ticker(new_ticker.strip().upper())
 
-# Uppdatera alla
-if st.button("🔄 Uppdatera data för alla tickers"):
-    df = update_all_data(df)
-    save_sheet(df)
-    st.success("Alla tickers uppdaterade.")
+    if st.button("🔄 Uppdatera alla bolag"):
+        update_all()
 
-# Visa tabell
-if df.empty:
-    st.info("Inga tickers tillagda ännu.")
-else:
-    st.dataframe(df)
+    if not df.empty:
+        st.dataframe(df)
+
+if __name__ == "__main__":
+    main()
