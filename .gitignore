@@ -1,18 +1,20 @@
 # Python
 __pycache__/
 *.py[cod]
-*.env
-.env
-venv/
+*.pyo
 
-# Streamlit secrets
+# Streamlit
 .streamlit/secrets.toml
 
-# OS
+# Mac
 .DS_Store
 
-# PyCharm
-.idea/
+# VS Code
+.vscode/
 
-# Google service account
-credentials.json
+# Pytest
+.pytest_cache/
+
+# Environment
+.env
+.venv/
