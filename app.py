@@ -1,75 +1,89 @@
 import streamlit as st
 import yfinance as yf
+import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-import pandas as pd
 
-# Titel
+# SIDHUVD
 st.set_page_config(page_title="Tillväxtaktier", layout="wide")
 st.title("📈 Automatisk analys av tillväxtaktier")
 
-# Google Sheets-autentisering
-scope = ["https://www.googleapis.com/auth/spreadsheets"]
-credentials = Credentials.from_service_account_info(st.secrets["GOOGLE_CREDENTIALS"], scopes=scope)
-client = gspread.authorize(credentials)
-
-# Ange rätt Google Sheet och blad
-SPREADSHEET_NAME = "Aktieanalys"
+# GOOGLE SHEET-ID OCH NAMN PÅ ARK
+SHEET_ID = "DIN_SHEET_ID_HÄR"  # byt ut detta med ID från din Google Sheets-länk
 SHEET_NAME = "Blad1"
-sh = client.open(SPREADSHEET_NAME)
+
+# GOOGLE AUTENTISERING
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+credentials = Credentials.from_service_account_info(st.secrets["GOOGLE_CREDENTIALS"], scopes=scope)
+gc = gspread.authorize(credentials)
+sh = gc.open_by_key(SHEET_ID)
 worksheet = sh.worksheet(SHEET_NAME)
 
-# Hämta existerande data
-data = worksheet.get_all_records()
-df = pd.DataFrame(data)
+# LADDA DATA FRÅN GOOGLE SHEET
+def load_data():
+    data = worksheet.get_all_records()
+    return pd.DataFrame(data)
 
-# Inmatning
-st.subheader("➕ Lägg till ett nytt bolag")
-with st.form("new_ticker_form"):
-    ticker_input = st.text_input("Ange ticker (t.ex. AAPL eller HM-B.ST)")
-    growth_2027 = st.number_input("Förväntad tillväxt 2027 (%)", min_value=0.0, max_value=100.0, value=15.0, step=0.5)
+# SPARA NY TICKER
+def save_ticker(ticker):
+    worksheet.append_row([ticker])
+
+# FUNKTION FÖR ATT HÄMTA AKTIEDATA OCH BERÄKNA P/S
+def fetch_analysis(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        hist = stock.quarterly_financials
+        if hist.empty or "Total Revenue" not in hist.index:
+            return None
+        
+        # Rullande TTM (sista 4 kvartal)
+        revenue_ttm = hist.loc["Total Revenue"].iloc[:4].sum()
+        market_cap = info.get("marketCap")
+        shares_outstanding = info.get("sharesOutstanding")
+        currency = info.get("financialCurrency", "USD")
+        current_price = info.get("currentPrice")
+
+        if revenue_ttm and shares_outstanding and current_price:
+            ps_ttm = market_cap / revenue_ttm if revenue_ttm else None
+            return {
+                "Ticker": ticker,
+                "Omsättning TTM": round(revenue_ttm / 1e6, 2),
+                "Börsvärde": round(market_cap / 1e6, 2) if market_cap else None,
+                "P/S TTM": round(ps_ttm, 2) if ps_ttm else None,
+                "Aktiekurs": round(current_price, 2),
+                "Valuta": currency
+            }
+        return None
+    except Exception as e:
+        st.warning(f"Fel vid hämtning av data för {ticker}: {e}")
+        return None
+
+# ANVÄNDARGRÄNSSNITT – Lägg till ny ticker
+with st.form("form"):
+    new_ticker = st.text_input("Lägg till ticker (t.ex. AAPL):").upper()
     submitted = st.form_submit_button("Lägg till")
+    if submitted and new_ticker:
+        existing = load_data()
+        if new_ticker not in existing["Ticker"].values:
+            save_ticker(new_ticker)
+            st.success(f"{new_ticker} tillagd!")
+        else:
+            st.info(f"{new_ticker} finns redan i listan.")
 
-    if submitted and ticker_input:
-        try:
-            ticker = yf.Ticker(ticker_input)
-            info = ticker.info
+# LADDA BOLAG FRÅN SHEET
+df = load_data()
 
-            name = info.get("shortName", "Okänt bolag")
-            currency = info.get("currency", "USD")
-            price = info.get("currentPrice", None)
-            shares = info.get("sharesOutstanding", None)
+# HÄMTA OCH VISA DATA
+results = []
+for ticker in df["Ticker"]:
+    result = fetch_analysis(ticker)
+    if result:
+        results.append(result)
 
-            if price is None or shares is None:
-                st.warning("Kunde inte hämta pris eller antal aktier.")
-            else:
-                # Hämta kvartalsdata och beräkna TTM sales
-                quarterly = ticker.quarterly_financials
-                if quarterly.empty or "Total Revenue" not in quarterly.index:
-                    st.warning("Kunde inte hämta omsättning.")
-                else:
-                    revenues = quarterly.loc["Total Revenue"].sort_index(ascending=False)
-                    if len(revenues) >= 4:
-                        ttm_sales = revenues.iloc[0:4].sum()
-                        ps_ttm = (price * shares) / ttm_sales
-                        sales_2027 = ttm_sales * (1 + growth_2027 / 100) ** 2
-                        target_price = (sales_2027 / shares) * ps_ttm
-
-                        # Lägg till till Google Sheet
-                        worksheet.append_row([ticker_input, growth_2027])
-
-                        st.success(f"{name} ({ticker_input}) har lagts till!")
-                        st.info(f"Nuvarande kurs: {price:.2f} {currency}")
-                        st.info(f"Beräknad målkurs 2027: {target_price:.2f} {currency}")
-                    else:
-                        st.warning("Inte tillräckligt med kvartalsdata.")
-        except Exception as e:
-            st.error(f"Fel: {e}")
-
-# Visa nuvarande tickers
-st.subheader("📋 Analyserade bolag")
-if df.empty:
-    st.info("Inga bolag tillagda ännu.")
+if results:
+    df_result = pd.DataFrame(results)
+    st.subheader("🔍 Analysresultat")
+    st.dataframe(df_result)
 else:
-    for index, row in df.iterrows():
-        st.markdown(f"- {row['Ticker']} – Tillväxt 2027: {row['Tillväxt 2027 (%)']}%")
+    st.info("Ingen data att visa ännu.")
