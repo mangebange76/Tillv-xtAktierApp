@@ -1,16 +1,16 @@
-# 📈 Tillväxtaktier
+# Aktieanalys-app 📈
 
-Streamlit-app för att analysera tillväxtaktier och beräkna målkurs för 2027 baserat på P/S TTM och tillväxt.
+Analysera aktier baserat på P/S och tillväxt i Streamlit Cloud.
 
 ## Funktioner
 
-- Lägg till ticker
-- Automatisk hämtning av data via yfinance
-- Spara och visa bolagsdata i Google Sheets
-- Målkurs- och omsättningsberäkning för 2027
+- Automatisk hämtning av finansiell data via yFinance
+- Tillväxtprognoser för 2025–2027
+- Målkursberäkning med P/S TTM
+- Spara och uppdatera data via Google Sheets
 
-## Kör lokalt
+## Installation
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
+1. Klona repot
+2. Lägg in din `secrets.toml` i `.streamlit/`
+3. Kör `streamlit run app.py`
