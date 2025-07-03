@@ -2,8 +2,3 @@ __pycache__/
 *.pyc
 .secrets/
 credentials.json
-setup.sh
-.streamlit/
-secrets.toml
-.env
-.DS_Store
