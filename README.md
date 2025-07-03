@@ -1,14 +1,13 @@
-# 📈 Aktieanalys-app
+# Aktieanalys 2027
 
-En Streamlit-app som:
+En Streamlit-app som analyserar aktier baserat på P/S TTM och tillväxtprognoser för 2025–2027.
 
-- Lägger till bolag med ticker
-- Hämtar data via yfinance
-- Beräknar omsättning TTM och P/S TTM
-- Gör tillväxtberäkningar till 2027
-- Sparar data i Google Sheet via gspread
+## Funktioner
+- Lägg till nya tickers
+- Uppdatera finansiell data automatiskt via Yahoo Finance
+- Beräkna målkurs för 2027
+- Använder Google Sheets för datalagring
 
 ## Installation
-
-```bash
-pip install -r requirements.txt
+1. Klona detta repo
+2. Installera beroenden:
