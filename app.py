@@ -4,95 +4,97 @@ import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Google Sheets autentisering
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/spreadsheets",
-         "https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/drive.file"]
-
+# Autentisering mot Google Sheets
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 credentials_dict = st.secrets["GOOGLE_CREDENTIALS"]
 credentials = Credentials.from_service_account_info(credentials_dict, scopes=scope)
 gc = gspread.authorize(credentials)
 
-SPREADSHEET_URL = st.secrets["SPREADSHEET_URL"]
-sheet = gc.open_by_url(SPREADSHEET_URL).sheet1
+# Öppna Google Sheet
+SPREADSHEET_ID = "1-IGWQacBAGo2nIDhTrCWZ9c3tJgm_oY0vRsWIzjG5Yo"
+sheet = gc.open_by_key(SPREADSHEET_ID).sheet1
 
-# Funktioner
-def load_data():
-    rows = sheet.get_all_values()
-    if not rows:
-        return pd.DataFrame(columns=["Ticker", "Namn", "Nuvarande kurs", "Valuta", "Omsättning TTM", "P/S TTM",
-                                     "Tillväxt 2025", "Tillväxt 2026", "Tillväxt 2027", "Omsättning 2027", "Målkurs 2027"])
-    headers = rows[0]
-    data = rows[1:]
-    return pd.DataFrame(data, columns=headers)
+# Säkerställ att rubriker finns
+HEADERS = ["Ticker", "Namn", "Nuvarande kurs", "Valuta", "Omsättning TTM", "P/S TTM", "Tillväxt 2025", "Tillväxt 2026", "Tillväxt 2027", "Omsättning 2027", "Målkurs 2027"]
+if sheet.row_values(1) != HEADERS:
+    sheet.insert_row(HEADERS, 1)
 
-def save_data(df):
-    sheet.clear()
-    sheet.append_row(df.columns.tolist())
-    for row in df.values.tolist():
-        sheet.append_row(row)
-
-def fetch_and_calculate(ticker, tillv_2027):
+def fetch_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        name = info.get("shortName", "")
-        price = info.get("currentPrice", "")
-        currency = info.get("currency", "")
+        t = yf.Ticker(ticker)
+        info = t.info
+        hist = t.quarterly_financials
+        if hist.empty:
+            return None
+
+        latest_price = info.get("currentPrice")
+        currency = info.get("financialCurrency", "USD")
+        name = info.get("shortName", ticker)
         shares = info.get("sharesOutstanding", None)
 
-        if not shares:
+        if not shares or not latest_price:
             return None
 
-        hist = stock.quarterly_financials
-        revenue = hist.loc["Total Revenue"] if "Total Revenue" in hist.index else None
-        if revenue is None or revenue.empty:
+        # Hämta TTM Revenue
+        rev_quarters = t.quarterly_financials.loc["Total Revenue"]
+        ttm_revenue = rev_quarters[:4].sum()
+
+        if ttm_revenue == 0:
             return None
 
-        # Hämta TTM omsättning
-        ttm_revenue = revenue.iloc[:, :4].sum()
-        ps_ttm = price / (ttm_revenue / shares)
-
-        # Tillväxt
-        tillv_2025 = info.get("earningsGrowth", 0) or 0
-        tillv_2026 = info.get("revenueGrowth", 0) or 0
-
-        oms_2027 = ttm_revenue * (1 + float(tillv_2025)) * (1 + float(tillv_2026)) * (1 + float(tillv_2027))
-        målpris = (oms_2027 / shares) * ps_ttm
+        market_cap = latest_price * shares
+        ps_ttm = market_cap / ttm_revenue
 
         return {
             "Ticker": ticker,
             "Namn": name,
-            "Nuvarande kurs": round(price, 2),
+            "Nuvarande kurs": latest_price,
             "Valuta": currency,
-            "Omsättning TTM": round(ttm_revenue, 0),
-            "P/S TTM": round(ps_ttm, 2),
-            "Tillväxt 2025": round(float(tillv_2025), 2),
-            "Tillväxt 2026": round(float(tillv_2026), 2),
-            "Tillväxt 2027": round(float(tillv_2027), 2),
-            "Omsättning 2027": round(oms_2027, 0),
-            "Målkurs 2027": round(målpris, 2)
+            "Omsättning TTM": ttm_revenue,
+            "P/S TTM": ps_ttm
         }
-    except:
+    except Exception as e:
+        st.error(f"Fel vid hämtning av data för {ticker}: {e}")
         return None
 
-# Gränssnitt
-st.title("🎯 Aktieanalys med P/S och tillväxt")
+def calculate_2027_revenue(ttm, g1, g2, g3):
+    return ttm * (1 + g1 / 100) * (1 + g2 / 100) * (1 + g3 / 100)
 
-df = load_data()
+def calculate_target_price(rev_2027, shares, ps_ttm):
+    return (rev_2027 / shares) * ps_ttm
 
-ticker = st.text_input("Ange ticker (t.ex. AAPL):").upper()
-tillv_2027 = st.number_input("Förväntad tillväxt 2027 (%)", value=10.0) / 100
+# UI
+st.title("📈 Aktieanalys med målkurs 2027")
+ticker_input = st.text_input("Ange ticker (t.ex. AAPL)")
 
-if st.button("Lägg till/uppdatera bolag"):
-    result = fetch_and_calculate(ticker, tillv_2027)
-    if result:
-        result_df = pd.DataFrame([result])
-        df = df[df["Ticker"] != ticker]
-        df = pd.concat([df, result_df], ignore_index=True)
-        save_data(df)
-        st.success(f"{ticker} har lagts till eller uppdaterats.")
+if st.button("Lägg till bolag") and ticker_input:
+    ticker = ticker_input.strip().upper()
+    data = fetch_data(ticker)
+
+    if data:
+        tillv_2025 = st.number_input("Förväntad tillväxt 2025 (%)", value=10.0, key="tillv1")
+        tillv_2026 = st.number_input("Förväntad tillväxt 2026 (%)", value=10.0, key="tillv2")
+        tillv_2027 = st.number_input("Förväntad tillväxt 2027 (%)", value=10.0, key="tillv3")
+
+        rev_2027 = calculate_2027_revenue(data["Omsättning TTM"], tillv_2025, tillv_2026, tillv_2027)
+        shares = yf.Ticker(ticker).info.get("sharesOutstanding", None)
+
+        if shares:
+            target_price = calculate_target_price(rev_2027, shares, data["P/S TTM"])
+            row = [
+                data["Ticker"], data["Namn"], data["Nuvarande kurs"], data["Valuta"],
+                data["Omsättning TTM"], data["P/S TTM"], tillv_2025, tillv_2026, tillv_2027,
+                rev_2027, target_price
+            ]
+            sheet.append_row(row)
+            st.success(f"{data['Namn']} tillagd med målkurs {target_price:.2f} {data['Valuta']}")
+        else:
+            st.error("Antal aktier saknas – kan inte beräkna målkurs.")
     else:
-        st.error(f"Kunde inte hämta data för {ticker}.")
+        st.error("Kunde inte hämta finansiell data.")
 
+# Visa nuvarande data
+st.subheader("🔍 Analysdata")
+df = pd.DataFrame(sheet.get_all_records())
 if not df.empty:
     st.dataframe(df)
