@@ -1,16 +1,15 @@
-# 📊 Aktieanalysapp – Målkurs 2027
+# Aktieanalys – Målkurs 2027
 
-Analysera aktier med automatisk data från Yahoo Finance och lagring i Google Sheets.
+Streamlit-app för att analysera aktier med P/S TTM och framtida tillväxt.
 
-## 🚀 Funktioner
+## Funktioner
 
-- Hämtar data via `yfinance`
-- Beräknar P/S TTM och målkurs för 2027
-- Lagrar data i Google Sheets
-- Kan köras på Streamlit Cloud
+- Hämtar data från Yahoo Finance
+- Beräknar P/S TTM och målkurs 2027
+- Sparar data i Google Sheets
+- Lägg till/ta bort bolag
 
-## 📁 Setup
+## Installation
 
-1. Lägg in filerna i GitHub
-2. Lägg in din `secrets.toml` i Streamlit Cloud
-3. Se till att Google Sheets är delat med servicekontots e-post
+1. Lägg in `secrets.toml` i Streamlit Cloud med Google-tjänstekonto
+2. Starta appen
