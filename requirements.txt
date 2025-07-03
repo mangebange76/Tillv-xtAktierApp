@@ -1,5 +1,6 @@
 streamlit
-pandas
 yfinance
+pandas
 gspread
+oauth2client
 google-auth
